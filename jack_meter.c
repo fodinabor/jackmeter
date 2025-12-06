@@ -39,6 +39,8 @@ int dpeak = 0;
 int dtime = 0;
 int decay_len;
 char *server_name = NULL;
+char *led_pwm_period_path = NULL;
+char *led_pwm_duty_cycle_path = NULL;
 jack_port_t *input_port = NULL;
 jack_client_t *client = NULL;
 jack_options_t options = JackNoStartServer;
@@ -169,12 +171,14 @@ static int fsleep( float secs )
 static int usage( const char * progname )
 {
 	fprintf(stderr, "jackmeter version %s\n\n", VERSION);
-	fprintf(stderr, "Usage %s [-f freqency] [-r ref-level] [-w width] [-s servername] [-n] [<port>, ...]\n\n", progname);
+	fprintf(stderr, "Usage %s [-f freqency] [-r ref-level] [-w width] [-s servername] [-l <path to pmw device>] [-n] [-o] [<port>, ...]\n\n", progname);
 	fprintf(stderr, "where  -f      is how often to update the meter per second [8]\n");
 	fprintf(stderr, "       -r      is the reference signal level for 0dB on the meter\n");
 	fprintf(stderr, "       -w      is how wide to make the meter [79]\n");
 	fprintf(stderr, "       -s      is the [optional] name given the jack server when it was started\n");
 	fprintf(stderr, "       -n      changes mode to output meter level as number in decibels\n");
+	fprintf(stderr, "       -o      do not loop if this is set. just a single query.\n");
+	fprintf(stderr, "       -l      PWM drive LED.\n");
 	fprintf(stderr, "       <port>  the port(s) to monitor (multiple ports are mixed)\n");
 	exit(1);
 }
@@ -249,6 +253,16 @@ void display_meter( int db, int width )
 	for(i=0; i<width-dpeak; i++) { printf(" "); }
 }
 
+void write_pwm_value(int pwm_value, const char *path) {
+	FILE *fp = fopen(path, "w");
+	if (fp != NULL) {
+		fprintf(fp, "%d\n", pwm_value);
+		fclose(fp);
+	} else {
+		fprintf(stderr, "Error: Unable to open PWM device at %s\n", path);
+	}
+}
+
 
 int main(int argc, char *argv[])
 {
@@ -263,7 +277,7 @@ int main(int argc, char *argv[])
 	// Make STDOUT unbuffered
 	setbuf(stdout, NULL);
 
-	while ((opt = getopt(argc, argv, "s:w:f:r:nhv")) != -1) {
+	while ((opt = getopt(argc, argv, "s:w:f:r:l:nhvo")) != -1) {
 		switch (opt) {
 			case 's':
 				server_name = (char *) malloc (sizeof (char) * strlen(optarg));
@@ -285,6 +299,21 @@ int main(int argc, char *argv[])
 				break;
 			case 'n':
 				decibels_mode = 1;
+				break;
+			case 'l':
+			    decibels_mode = 2;
+				const char* period_suffix = "/period";
+				const char* duty_cycle_suffix = "/duty_cycle";
+
+				led_pwm_period_path = (char *) malloc (sizeof (char) * (strlen(optarg) + strlen(period_suffix) + 1));
+				strcpy (led_pwm_period_path, optarg);
+				strcpy (led_pwm_period_path + strlen(optarg), period_suffix);
+				led_pwm_duty_cycle_path = (char *) malloc (sizeof (char) * (strlen(optarg) + strlen(duty_cycle_suffix) + 1));
+				strcpy (led_pwm_duty_cycle_path, optarg);
+				strcpy (led_pwm_duty_cycle_path + strlen(optarg), duty_cycle_suffix);
+				break;
+			case 'o':
+				running = 0;
 				break;
 			case 'h':
 			case 'v':
@@ -342,17 +371,27 @@ int main(int argc, char *argv[])
 		display_scale( console_width );
 	}
 
-	while (running) {
+	read_peak(); // clear any initial peak
+	fsleep( 1.0f/rate );
+	
+	do {
 		float db = 20.0f * log10f(read_peak() * bias);
 		
 		if (decibels_mode==1) {
-			printf("%1.1f\n", db);
+			printf("%3.0f\n", db);
+			printf("%d\n", iec_scale( db, 100 ));
+		} else if (decibels_mode==2) {
+		    // PWM LED drive mode
+		    int pwm_value = iec_scale( db, 100 );
+		    write_pwm_value(0, led_pwm_duty_cycle_path);
+		    write_pwm_value(240000, led_pwm_period_path);
+		    write_pwm_value(pwm_value * 2400, led_pwm_duty_cycle_path);
 		} else {
 			display_meter( db, console_width );
 		}
 		
 		fsleep( 1.0f/rate );
-	}
+	} while (running);
 
 	return 0;
 }
